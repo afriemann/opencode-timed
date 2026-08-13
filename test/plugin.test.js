@@ -23,16 +23,34 @@ const makeAssistantMsg = (id, parts) => ({ info: { id, role: 'assistant' }, part
 describe('chat.message hook — timestamp capture', () => {
   test('does NOT modify output.parts', async () => {
     const plugin = await makePlugin()
-    const output = { parts: [{ type: 'text', text: 'hello' }] }
-    await plugin['chat.message']({ messageID: 'msg-1', sessionID: 's' }, output)
+    const output = { message: { id: 'msg-1', role: 'user' }, parts: [{ type: 'text', text: 'hello' }] }
+    await plugin['chat.message']({ sessionID: 's' }, output)
     expect(output.parts[0].text).toBe('hello')
   })
 
-  test('is a no-op when messageID is absent', async () => {
+  test('records by output.message.id when input.messageID is absent (normal case)', async () => {
+    const plugin = await makePlugin()
+    // Simulate opencode: input.messageID undefined, actual ID only in output.message.id
+    const output = { message: { id: 'msg-assigned', role: 'user' }, parts: [] }
+    await plugin['chat.message']({}, output)
+    // Verify recording by checking transform picks it up
+    const msgs = [makeMsg('msg-assigned', [{ type: 'text', text: 'hi' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].text).toMatch(/^\[.+\] hi$/)
+  })
+
+  test('falls back to input.messageID when output.message is absent', async () => {
+    const plugin = await makePlugin()
+    await plugin['chat.message']({ messageID: 'msg-fallback' }, {})
+    const msgs = [makeMsg('msg-fallback', [{ type: 'text', text: 'hi' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].text).toMatch(/^\[.+\] hi$/)
+  })
+
+  test('is a no-op when both messageID sources are absent', async () => {
     const plugin = await makePlugin()
     const output = { parts: [{ type: 'text', text: 'hello' }] }
     await plugin['chat.message']({}, output)
-    // no error thrown; parts unchanged
     expect(output.parts[0].text).toBe('hello')
   })
 })
@@ -42,7 +60,7 @@ describe('chat.message hook — timestamp capture', () => {
 describe('experimental.chat.messages.transform hook — timestamp injection', () => {
   test('prepends timestamp to first text part of a recorded user message', async () => {
     const plugin = await makePlugin()
-    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({}, { message: { id: 'msg-1' }, parts: [] })
     const msgs = [makeMsg('msg-1', [{ type: 'text', text: 'hello world' }])]
     await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
     expect(msgs[0].parts[0].text).toMatch(/^\[.+\] hello world$/)
@@ -50,7 +68,7 @@ describe('experimental.chat.messages.transform hook — timestamp injection', ()
 
   test('timestamp matches ISO format by default', async () => {
     const plugin = await makePlugin()
-    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({}, { message: { id: 'msg-1' }, parts: [] })
     const msgs = [makeMsg('msg-1', [{ type: 'text', text: 'hi' }])]
     await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
     expect(msgs[0].parts[0].text).toMatch(
@@ -60,7 +78,7 @@ describe('experimental.chat.messages.transform hook — timestamp injection', ()
 
   test('preserves other fields on the mutated text part', async () => {
     const plugin = await makePlugin()
-    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({}, { message: { id: 'msg-1' }, parts: [] })
     const msgs = [makeMsg('msg-1', [{ type: 'text', text: 'hi', extra: 'keep-me' }])]
     await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
     expect(msgs[0].parts[0].extra).toBe('keep-me')
@@ -68,7 +86,7 @@ describe('experimental.chat.messages.transform hook — timestamp injection', ()
 
   test('targets the first text part when multiple parts exist', async () => {
     const plugin = await makePlugin()
-    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({}, { message: { id: 'msg-1' }, parts: [] })
     const msgs = [
       makeMsg('msg-1', [
         { type: 'image', data: 'img-data' },
@@ -82,7 +100,7 @@ describe('experimental.chat.messages.transform hook — timestamp injection', ()
 
   test('inserts standalone text part at front for image-only messages', async () => {
     const plugin = await makePlugin()
-    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({}, { message: { id: 'msg-1' }, parts: [] })
     const msgs = [makeMsg('msg-1', [{ type: 'image', data: 'img-data' }])]
     await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
     expect(msgs[0].parts).toHaveLength(2)
@@ -100,7 +118,7 @@ describe('experimental.chat.messages.transform hook — timestamp injection', ()
 
   test('skips assistant messages', async () => {
     const plugin = await makePlugin()
-    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({}, { message: { id: 'msg-1' }, parts: [] })
     const msgs = [makeAssistantMsg('msg-1', [{ type: 'text', text: 'reply' }])]
     await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
     expect(msgs[0].parts[0].text).toBe('reply')
@@ -108,7 +126,7 @@ describe('experimental.chat.messages.transform hook — timestamp injection', ()
 
   test('injects into each user message independently', async () => {
     const plugin = await makePlugin()
-    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({}, { message: { id: 'msg-1' }, parts: [] })
     await plugin['chat.message']({ messageID: 'msg-2' }, { parts: [] })
     const msgs = [
       makeMsg('msg-1', [{ type: 'text', text: 'first' }]),
@@ -132,7 +150,7 @@ describe('experimental.chat.messages.transform hook — timestamp injection', ()
 describe('format options', () => {
   const inject = async (options) => {
     const plugin = await makePlugin(options)
-    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({}, { message: { id: 'msg-1' }, parts: [] })
     const msgs = [makeMsg('msg-1', [{ type: 'text', text: 'hi' }])]
     await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
     return msgs[0].parts[0].text

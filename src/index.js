@@ -75,10 +75,14 @@ const TimedPlugin = async ({ client }, options = {}) => {
   return {
     // Record the send-time of every user message. Do NOT touch output.parts —
     // that would modify the stored message and show up in the TUI.
-    'chat.message': async (input, _output) => {
+    //
+    // input.messageID is undefined for normal messages (opencode assigns the ID
+    // internally); the actual assigned ID is always in output.message.id.
+    'chat.message': async (input, output) => {
       try {
-        if (input?.messageID) {
-          messageTimestamps.set(input.messageID, getTimestamp())
+        const messageID = output?.message?.id ?? input?.messageID
+        if (messageID) {
+          messageTimestamps.set(messageID, getTimestamp())
         }
       } catch (err) {
         log('chat.message hook failed', err)
