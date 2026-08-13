@@ -1,13 +1,15 @@
 // src/index.js — opencode-timed plugin
 //
-// Prepends a timestamp to every outgoing user message so the model always
-// knows when the message was sent.  The timestamp is injected into the first
-// text part of the message; if no text part exists a new one is prepended.
+// Injects the current time into the system prompt on every LLM call so the
+// model always knows when it is processing the turn.  The timestamp is
+// appended to the system prompt via the experimental.chat.system.transform
+// hook, making it completely invisible in the TUI while still visible to
+// the model.
 //
 // Configuration (via plugin options or ~/.config/opencode/opencode-timed.json):
-//   format  'iso'       ISO 8601 UTC:            "[2026-08-13T14:32:05.123Z]"  (default)
-//           'datetime'  Local date + time:        "[2026-08-13 14:32:05]"
-//           'time'      Local time only:          "[14:32:05]"
+//   format  'iso'       ISO 8601 UTC:            "2026-08-13T14:32:05.123Z"  (default)
+//           'datetime'  Local date + time:        "2026-08-13 14:32:05"
+//           'time'      Local time only:          "14:32:05"
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -62,25 +64,11 @@ const TimedPlugin = async ({ client }, options = {}) => {
 
   // ── Hooks ─────────────────────────────────────────────────────────────────
   return {
-    'chat.message': async (_input, output) => {
+    'experimental.chat.system.transform': async (_input, output) => {
       try {
-        if (!Array.isArray(output.parts) || output.parts.length === 0) return
-
-        const ts = getTimestamp()
-        const firstTextIdx = output.parts.findIndex((p) => p && p.type === 'text')
-
-        if (firstTextIdx >= 0) {
-          // Prepend the timestamp inline to the existing text part.
-          output.parts[firstTextIdx] = {
-            ...output.parts[firstTextIdx],
-            text: `[${ts}] ${output.parts[firstTextIdx].text}`,
-          }
-        } else {
-          // No text part present (e.g. image-only message) — insert one at the front.
-          output.parts.unshift({ type: 'text', text: `[${ts}]` })
-        }
+        output.system.push(`Current time: ${getTimestamp()}`)
       } catch (err) {
-        log('chat.message hook failed', err)
+        log('experimental.chat.system.transform hook failed', err)
       }
     },
   }
