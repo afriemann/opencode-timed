@@ -1,15 +1,20 @@
 // src/index.js — opencode-timed plugin
 //
-// Injects the current time into the system prompt on every LLM call so the
-// model always knows when it is processing the turn.  The timestamp is
-// appended to the system prompt via the experimental.chat.system.transform
-// hook, making it completely invisible in the TUI while still visible to
-// the model.
+// Injects per-message timestamps into LLM calls so the model knows exactly
+// when each user message was sent, while the TUI shows clean messages.
+//
+// Strategy:
+//   chat.message  — records the wall-clock time for each message by messageID
+//                   without modifying the stored message (TUI stays clean)
+//   experimental.chat.messages.transform — prepends the recorded timestamp to
+//                   the first text part of each matching user message before
+//                   the LLM call; opencode loads MessageV2 copies fresh per
+//                   call, so DB and TUI are never affected
 //
 // Configuration (via plugin options or ~/.config/opencode/opencode-timed.json):
-//   format  'iso'       ISO 8601 UTC:            "2026-08-13T14:32:05.123Z"  (default)
-//           'datetime'  Local date + time:        "2026-08-13 14:32:05"
-//           'time'      Local time only:          "14:32:05"
+//   format  'iso'       ISO 8601 UTC:            "[2026-08-13T14:32:05.123Z]"  (default)
+//           'datetime'  Local date + time:        "[2026-08-13 14:32:05]"
+//           'time'      Local time only:          "[14:32:05]"
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -62,13 +67,48 @@ const TimedPlugin = async ({ client }, options = {}) => {
     }
   }
 
+  // ── Per-message timestamp store ───────────────────────────────────────────
+  // keyed by messageID; lives for the lifetime of the opencode process.
+  const messageTimestamps = new Map()
+
   // ── Hooks ─────────────────────────────────────────────────────────────────
   return {
-    'experimental.chat.system.transform': async (_input, output) => {
+    // Record the send-time of every user message. Do NOT touch output.parts —
+    // that would modify the stored message and show up in the TUI.
+    'chat.message': async (input, _output) => {
       try {
-        output.system.push(`Current time: ${getTimestamp()}`)
+        if (input?.messageID) {
+          messageTimestamps.set(input.messageID, getTimestamp())
+        }
       } catch (err) {
-        log('experimental.chat.system.transform hook failed', err)
+        log('chat.message hook failed', err)
+      }
+    },
+
+    // Before each LLM call, prepend stored timestamps to user message parts.
+    // opencode loads MessageV2 objects fresh from DB per call, so these
+    // in-place mutations never reach the DB or the TUI.
+    'experimental.chat.messages.transform': async (_input, output) => {
+      try {
+        if (!Array.isArray(output.messages)) return
+        for (const msg of output.messages) {
+          if (msg?.info?.role !== 'user') continue
+          const ts = messageTimestamps.get(msg.info.id)
+          if (!ts) continue
+          if (!Array.isArray(msg.parts) || msg.parts.length === 0) continue
+
+          const firstTextIdx = msg.parts.findIndex((p) => p && p.type === 'text')
+          if (firstTextIdx >= 0) {
+            msg.parts[firstTextIdx] = {
+              ...msg.parts[firstTextIdx],
+              text: `[${ts}] ${msg.parts[firstTextIdx].text}`,
+            }
+          } else {
+            msg.parts.unshift({ type: 'text', text: `[${ts}]` })
+          }
+        }
+      } catch (err) {
+        log('experimental.chat.messages.transform hook failed', err)
       }
     },
   }

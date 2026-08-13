@@ -1,8 +1,8 @@
 // test/plugin.test.js — behavioural tests for the opencode-timed plugin.
 //
-// Tests cover the observable hook contract: current time appended to the
-// system prompt, existing entries preserved, no-op on missing array, and
-// each configured format producing the expected pattern.
+// Tests cover the two-hook coordination: chat.message records the timestamp
+// without modifying stored parts; messages.transform injects it into the LLM
+// call copy keyed by messageID.  Also covers edge cases and format options.
 
 import TimedPlugin from '../src/index.js'
 
@@ -15,73 +15,146 @@ const makeClient = () => ({
 const makePlugin = (options = {}) =>
   TimedPlugin({ client: makeClient() }, options)
 
-const HOOK = 'experimental.chat.system.transform'
+const makeMsg = (id, parts) => ({ info: { id, role: 'user' }, parts })
+const makeAssistantMsg = (id, parts) => ({ info: { id, role: 'assistant' }, parts })
 
-// ── Tests ──────────────────────────────────────────────────────────────────
+// ── chat.message hook ──────────────────────────────────────────────────────
 
-describe(`${HOOK} hook — timestamp injection`, () => {
-  test('appends "Current time: <ISO ts>" to system array (default format)', async () => {
+describe('chat.message hook — timestamp capture', () => {
+  test('does NOT modify output.parts', async () => {
     const plugin = await makePlugin()
-    const output = { system: [] }
-    await plugin[HOOK]({}, output)
-    expect(output.system).toHaveLength(1)
-    expect(output.system[0]).toMatch(
-      /^Current time: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/,
-    )
+    const output = { parts: [{ type: 'text', text: 'hello' }] }
+    await plugin['chat.message']({ messageID: 'msg-1', sessionID: 's' }, output)
+    expect(output.parts[0].text).toBe('hello')
   })
 
-  test('preserves existing system entries', async () => {
+  test('is a no-op when messageID is absent', async () => {
     const plugin = await makePlugin()
-    const output = { system: ['You are a helpful assistant.'] }
-    await plugin[HOOK]({}, output)
-    expect(output.system).toHaveLength(2)
-    expect(output.system[0]).toBe('You are a helpful assistant.')
-    expect(output.system[1]).toMatch(/^Current time: /)
-  })
-
-  test('appends once per call (multiple calls accumulate)', async () => {
-    const plugin = await makePlugin()
-    const output = { system: [] }
-    await plugin[HOOK]({}, output)
-    await plugin[HOOK]({}, output)
-    expect(output.system).toHaveLength(2)
-    expect(output.system[0]).toMatch(/^Current time: /)
-    expect(output.system[1]).toMatch(/^Current time: /)
+    const output = { parts: [{ type: 'text', text: 'hello' }] }
+    await plugin['chat.message']({}, output)
+    // no error thrown; parts unchanged
+    expect(output.parts[0].text).toBe('hello')
   })
 })
 
-describe(`${HOOK} hook — format options`, () => {
-  test('datetime format produces "Current time: YYYY-MM-DD HH:MM:SS"', async () => {
-    const plugin = await makePlugin({ format: 'datetime' })
-    const output = { system: [] }
-    await plugin[HOOK]({}, output)
-    expect(output.system[0]).toMatch(
-      /^Current time: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/,
+// ── messages.transform hook ────────────────────────────────────────────────
+
+describe('experimental.chat.messages.transform hook — timestamp injection', () => {
+  test('prepends timestamp to first text part of a recorded user message', async () => {
+    const plugin = await makePlugin()
+    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    const msgs = [makeMsg('msg-1', [{ type: 'text', text: 'hello world' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].text).toMatch(/^\[.+\] hello world$/)
+  })
+
+  test('timestamp matches ISO format by default', async () => {
+    const plugin = await makePlugin()
+    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    const msgs = [makeMsg('msg-1', [{ type: 'text', text: 'hi' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].text).toMatch(
+      /^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\] hi$/,
     )
   })
 
-  test('time format produces "Current time: HH:MM:SS"', async () => {
-    const plugin = await makePlugin({ format: 'time' })
-    const output = { system: [] }
-    await plugin[HOOK]({}, output)
-    expect(output.system[0]).toMatch(/^Current time: \d{2}:\d{2}:\d{2}$/)
+  test('preserves other fields on the mutated text part', async () => {
+    const plugin = await makePlugin()
+    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    const msgs = [makeMsg('msg-1', [{ type: 'text', text: 'hi', extra: 'keep-me' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].extra).toBe('keep-me')
   })
 
-  test('iso format (explicit) produces ISO 8601 UTC', async () => {
-    const plugin = await makePlugin({ format: 'iso' })
-    const output = { system: [] }
-    await plugin[HOOK]({}, output)
-    expect(output.system[0]).toMatch(
-      /^Current time: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/,
-    )
+  test('targets the first text part when multiple parts exist', async () => {
+    const plugin = await makePlugin()
+    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    const msgs = [
+      makeMsg('msg-1', [
+        { type: 'image', data: 'img-data' },
+        { type: 'text', text: 'describe this' },
+      ]),
+    ]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].type).toBe('image')
+    expect(msgs[0].parts[1].text).toMatch(/^\[.+\] describe this$/)
+  })
+
+  test('inserts standalone text part at front for image-only messages', async () => {
+    const plugin = await makePlugin()
+    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    const msgs = [makeMsg('msg-1', [{ type: 'image', data: 'img-data' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts).toHaveLength(2)
+    expect(msgs[0].parts[0].type).toBe('text')
+    expect(msgs[0].parts[0].text).toMatch(/^\[.+\]$/)
+    expect(msgs[0].parts[1].type).toBe('image')
+  })
+
+  test('skips messages with no recorded timestamp', async () => {
+    const plugin = await makePlugin()
+    const msgs = [makeMsg('unknown-id', [{ type: 'text', text: 'hi' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].text).toBe('hi')
+  })
+
+  test('skips assistant messages', async () => {
+    const plugin = await makePlugin()
+    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    const msgs = [makeAssistantMsg('msg-1', [{ type: 'text', text: 'reply' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].text).toBe('reply')
+  })
+
+  test('injects into each user message independently', async () => {
+    const plugin = await makePlugin()
+    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    await plugin['chat.message']({ messageID: 'msg-2' }, { parts: [] })
+    const msgs = [
+      makeMsg('msg-1', [{ type: 'text', text: 'first' }]),
+      makeMsg('msg-2', [{ type: 'text', text: 'second' }]),
+    ]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    expect(msgs[0].parts[0].text).toMatch(/^\[.+\] first$/)
+    expect(msgs[1].parts[0].text).toMatch(/^\[.+\] second$/)
+  })
+
+  test('is a no-op when messages is empty', async () => {
+    const plugin = await makePlugin()
+    const output = { messages: [] }
+    await plugin['experimental.chat.messages.transform']({}, output)
+    expect(output.messages).toHaveLength(0)
+  })
+})
+
+// ── format options ─────────────────────────────────────────────────────────
+
+describe('format options', () => {
+  const inject = async (options) => {
+    const plugin = await makePlugin(options)
+    await plugin['chat.message']({ messageID: 'msg-1' }, { parts: [] })
+    const msgs = [makeMsg('msg-1', [{ type: 'text', text: 'hi' }])]
+    await plugin['experimental.chat.messages.transform']({}, { messages: msgs })
+    return msgs[0].parts[0].text
+  }
+
+  test('datetime format produces [YYYY-MM-DD HH:MM:SS] prefix', async () => {
+    const text = await inject({ format: 'datetime' })
+    expect(text).toMatch(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\] hi$/)
+  })
+
+  test('time format produces [HH:MM:SS] prefix', async () => {
+    const text = await inject({ format: 'time' })
+    expect(text).toMatch(/^\[\d{2}:\d{2}:\d{2}\] hi$/)
+  })
+
+  test('iso format (explicit) produces ISO 8601 UTC prefix', async () => {
+    const text = await inject({ format: 'iso' })
+    expect(text).toMatch(/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\] hi$/)
   })
 
   test('unknown format falls back to iso', async () => {
-    const plugin = await makePlugin({ format: 'bogus' })
-    const output = { system: [] }
-    await plugin[HOOK]({}, output)
-    expect(output.system[0]).toMatch(
-      /^Current time: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z$/,
-    )
+    const text = await inject({ format: 'bogus' })
+    expect(text).toMatch(/^\[\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+Z\] hi$/)
   })
 })

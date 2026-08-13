@@ -1,14 +1,19 @@
 # opencode-timed
 
-An [opencode](https://opencode.ai) plugin that injects the current time into
-the system prompt on every LLM call — so the model always knows when it is
-processing the turn, without cluttering the chat UI.
+An [opencode](https://opencode.ai) plugin that attaches a per-message
+timestamp to every user message sent to the model — so the model always knows
+exactly when each message was sent, without cluttering the chat UI.
 
 ## How it works
 
-The plugin uses the `experimental.chat.system.transform` hook to append a
-`Current time: <timestamp>` line to the system prompt before each LLM call.
-The timestamp is invisible in the TUI; only the model sees it.
+Two hooks work together:
+
+1. **`chat.message`** — records the wall-clock time for each message by its
+   internal ID, without touching the stored message (TUI stays clean).
+2. **`experimental.chat.messages.transform`** — before every LLM call,
+   prepends `[<timestamp>]` to the first text part of each matching user
+   message. opencode loads message copies fresh from the DB per call, so
+   these mutations never reach the DB or the TUI.
 
 ## Installation
 
