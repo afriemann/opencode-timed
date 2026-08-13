@@ -1,0 +1,23 @@
+{
+  "name": "opencode-timed",
+  "version": "0.1.0",
+  "description": "opencode plugin — prepend a timestamp to every outgoing user message so the model always knows when the message was sent",
+  "type": "module",
+  "main": "src/index.js",
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --passWithNoTests"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": ">=1.15.0"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2"
+  },
+  "license": "MIT"
+}
