@@ -145,6 +145,34 @@ describe('experimental.chat.messages.transform hook — timestamp injection', ()
   })
 })
 
+// ── system.transform hook ──────────────────────────────────────────────────
+
+describe('experimental.chat.system.transform hook — system prompt injection', () => {
+  test('pushes a timestamp explanation into an empty system array', async () => {
+    const plugin = await makePlugin()
+    const output = { system: [] }
+    await plugin['experimental.chat.system.transform']({}, output)
+    expect(output.system).toHaveLength(1)
+    expect(output.system[0]).toContain('timestamp')
+  })
+
+  test('appends after existing system prompt entries', async () => {
+    const plugin = await makePlugin()
+    const output = { system: ['existing instruction'] }
+    await plugin['experimental.chat.system.transform']({}, output)
+    expect(output.system).toHaveLength(2)
+    expect(output.system[0]).toBe('existing instruction')
+  })
+
+  test('injected text mentions acting on time gaps between messages', async () => {
+    const plugin = await makePlugin()
+    const output = { system: [] }
+    await plugin['experimental.chat.system.transform']({}, output)
+    const injected = output.system[0]
+    expect(injected).toMatch(/gap|time.*pass|between.*message/i)
+  })
+})
+
 // ── format options ─────────────────────────────────────────────────────────
 
 describe('format options', () => {

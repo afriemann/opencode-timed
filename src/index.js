@@ -67,6 +67,21 @@ const TimedPlugin = async ({ client }, options = {}) => {
     }
   }
 
+  // ── System prompt ──────────────────────────────────────────────────────────
+  // Injected once per LLM call so agents know what the timestamps mean and
+  // how to act when they notice time has passed between messages.
+  const SYSTEM_PROMPT = [
+    '## Message timestamps (opencode-timed)',
+    '',
+    'Every user message is prefixed with `[<timestamp>]` recording the exact moment it was sent.',
+    '',
+    'When you notice a time gap between messages, treat prior conversational state as potentially stale:',
+    '- A gap of minutes: re-check open questions or pending actions from earlier in the session.',
+    '- A gap of hours or days: proactively verify anything you discussed — open PRs, branches,',
+    '  deployments, running tasks — before asserting their status. Do not assume they are still',
+    '  open, unmerged, running, or otherwise unchanged.',
+  ].join('\n')
+
   // ── Per-message timestamp store ───────────────────────────────────────────
   // keyed by messageID; lives for the lifetime of the opencode process.
   const messageTimestamps = new Map()
@@ -86,6 +101,16 @@ const TimedPlugin = async ({ client }, options = {}) => {
         }
       } catch (err) {
         log('chat.message hook failed', err)
+      }
+    },
+
+    // Before each LLM call, inject an explanation of the timestamp format and
+    // how to act on time gaps into the system prompt.
+    'experimental.chat.system.transform': async (_, output) => {
+      try {
+        output.system.push(SYSTEM_PROMPT)
+      } catch (err) {
+        log('experimental.chat.system.transform hook failed', err)
       }
     },
 
