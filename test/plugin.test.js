@@ -4,7 +4,7 @@
 // without modifying stored parts; messages.transform injects it into the LLM
 // call copy keyed by messageID.  Also covers edge cases and format options.
 
-import TimedPlugin from '../src/index.js'
+import TimedPlugin from '../src/plugin.v1.js'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
