@@ -33,13 +33,10 @@ import {
   createTimestampStore,
   injectTimestampsIntoMessages,
   formatLogMessage,
+  CONFIG_FILE,
+  PLUGIN_NAME,
 } from './core.js'
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import { homedir } from 'node:os'
-
-const PLUGIN_NAME = 'opencode-timed'
-const CONFIG_FILE = join(homedir(), '.config', 'opencode', 'opencode-timed.json')
 
 const V2_ACCESSORS = {
   getId: (msg) => msg?.id,

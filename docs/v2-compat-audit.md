@@ -127,8 +127,64 @@ without error.
 
 ## Test suite
 
-34 tests passing across 3 suites: 20 pre-existing V1 tests (`test/plugin.test.js`, behavior
-unchanged — only the import path was updated), 10 V2-specific lifecycle tests
+36 tests passing across 3 suites: 20 pre-existing V1 tests (`test/plugin.test.js`, behavior
+unchanged — only the import path was updated), 12 V2-specific lifecycle tests
 (`test/plugin.v2.test.js`), and 4 shared adapter-conformance tests
 (`test/adapter-conformance.test.js`) asserting both entrypoints produce equivalent observable
 prefixes for equivalent inputs, and that only the ephemeral, per-call output is ever mutated.
+
+_(Re-verified 2026-09-17: `npm test` reports 36 passed, 36 total across the same 3 suites —
+count re-confirmed at commit time of the `src/core.js` constant-hoisting refactor below.)_
+
+## Follow-up: constant hoisting (2026-09-17)
+
+Post-port design review flagged two verbatim-duplicated constants across the two adapters:
+
+- `CONFIG_FILE` (the `~/.config/opencode/opencode-timed.json` path expression) was
+  independently constructed in both `src/plugin.v1.js` and `src/plugin.v2.js`.
+- The plugin's own name string (`'opencode-timed'`) was declared three times: as `SERVICE`
+  in `src/core.js` (used only for the log-line prefix), as `PLUGIN_NAME` in
+  `src/plugin.v2.js` (used for the V2 adapter's `id` field), and as an inline literal in
+  `src/plugin.v1.js`'s `client.app.log` call (`service: 'opencode-timed'`).
+
+Both are now hoisted into `src/core.js` as `export const CONFIG_FILE` and
+`export const PLUGIN_NAME`; both adapters import and reuse them instead of re-declaring.
+Pure refactor — no behavioral change. Verified via the Simplification-change exemption path:
+full suite (36 tests, 3 suites) confirmed green both immediately before and immediately after
+the change, with no other observable diff.
+
+## Native `core/date` capability vs. this plugin (2026-09-17)
+
+V2 ships a built-in `core/date` "Instructions" source (`packages/core/src/instructions/builtins.ts`,
+verified 2026-09-17 against `/tmp/opencode/v2-src` tag `v2.0.6`) that unconditionally injects a
+single line — `"Today's date: <date>"` — into every session, using `Date.prototype.toDateString()`
+(day granularity only, no time-of-day). It is a single evolving "current value" per session, not
+a per-message record, and it is **not exposed to plugins at all**: there is no
+`instruction`-related surface anywhere in `packages/plugin/src`. A plugin cannot register into,
+extend, read from, or otherwise interact with this native mechanism.
+
+This is architecturally the closest native cousin to what `opencode-timed` does, but it is
+complementary rather than a replacement:
+
+- **Granularity.** `core/date` only ever states the current calendar day at the moment each
+  Instructions block is composed. It cannot express *when a specific past message arrived*, nor
+  the *elapsed time between two messages* (e.g. "message A arrived 3 hours before message B") —
+  the exact differentiator this plugin exists to provide, via its per-message timestamp store
+  (`createTimestampStore` in `src/core.js`) and the record-in-`prompt`/inject-in-`context`
+  pattern documented above.
+- **No extension point.** Even if `core/date`'s single-value model were adequate, there is no
+  API surface for a plugin to hook into, augment, or replace it. `opencode-timed`'s own
+  `context`-hook injection is the only way to get this information into the model at all.
+
+Conclusion: `core/date`'s existence does not obsolete or overlap functionally with this plugin.
+No design change follows from this finding.
+
+## Dual-entrypoint single-file pattern: considered and rejected (2026-09-17)
+
+Considered and rejected (2026-09-17): collapsing `src/plugin.v1.js` and `src/plugin.v2.js` into a
+single dual-entrypoint file, the way some sibling plugin ports do. opencode's own docs require a
+host floor of `@opencode-ai/plugin >= 1.18.29` for a V1 host to safely recognize that pattern.
+This repo's stated peer-dependency floor (`package.json`: `"@opencode-ai/plugin": ">=1.15.0"`) is
+below that floor, so an older V1 host in the `>=1.15.0, <1.18.29` range could load the collapsed
+file incorrectly. The two-file, per-runtime-entrypoint structure (`./v1` and `./v2` in
+`package.json`'s `exports` map, both re-exporting shared behavior from `src/core.js`) is kept as-is.

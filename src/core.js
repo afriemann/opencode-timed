@@ -12,7 +12,23 @@
 // V2 records in the `prompt` hook without mutating its payload, and injects
 // only in the `context` hook's ephemeral `messages` array).
 
-const SERVICE = 'opencode-timed'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+
+/**
+ * The plugin's own name, used as the log-line prefix (`formatLogMessage`)
+ * and as the V2 adapter's `id`. Single source of truth for both adapters —
+ * previously declared separately in each (`SERVICE` here, `PLUGIN_NAME` in
+ * plugin.v2.js, an inline literal in plugin.v1.js's log call).
+ */
+export const PLUGIN_NAME = 'opencode-timed'
+
+/**
+ * Path to the plugin's user-level config file. Single source of truth for
+ * both adapters — previously duplicated verbatim in plugin.v1.js and
+ * plugin.v2.js.
+ */
+export const CONFIG_FILE = join(homedir(), '.config', 'opencode', 'opencode-timed.json')
 
 // ---------------------------------------------------------------------------
 // Config
@@ -178,5 +194,5 @@ export function formatLogMessage(message, err) {
   const detail = err
     ? `: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`
     : ''
-  return `[${SERVICE}] ${message}${detail}`
+  return `[${PLUGIN_NAME}] ${message}${detail}`
 }

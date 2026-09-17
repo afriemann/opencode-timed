@@ -6,8 +6,6 @@
 // stderr) to core's runtime-agnostic behavior.
 
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
-import { homedir } from 'node:os'
 import {
   loadConfig,
   getTimestamp,
@@ -15,9 +13,9 @@ import {
   createTimestampStore,
   injectTimestampsIntoMessages,
   formatLogMessage,
+  CONFIG_FILE,
+  PLUGIN_NAME,
 } from './core.js'
-
-const CONFIG_FILE = join(homedir(), '.config', 'opencode', 'opencode-timed.json')
 
 const V1_ACCESSORS = {
   getId: (msg) => msg?.info?.id,
@@ -29,7 +27,7 @@ const TimedPlugin = async ({ client }, options = {}) => {
   const log = (msg, err, level = err ? 'error' : 'info') => {
     const message = formatLogMessage(msg, err)
     try {
-      const result = client.app.log({ body: { service: 'opencode-timed', level, message } })
+      const result = client.app.log({ body: { service: PLUGIN_NAME, level, message } })
       result?.catch?.(() => process.stderr.write(message + '\n'))
     } catch {
       process.stderr.write(message + '\n')
