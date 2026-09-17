@@ -11,7 +11,10 @@ system prompt.
 ### Requirement: Each user message's send time is recorded without modifying the stored message
 
 The plugin SHALL record the wall-clock time at which each user message is submitted, keyed by
-the message's own identifier, without mutating any field the host persists or displays.
+the message's own identifier, without mutating any field the host persists or displays. On V2,
+this identifier SHALL be read directly from the runtime's own prompt-submission event and the
+event's prompt payload SHALL NOT be mutated at this point, since that payload may be the value
+the host persists as the stored message body.
 
 #### Scenario: Does NOT modify the stored message content
 
@@ -29,12 +32,20 @@ the message's own identifier, without mutating any field the host persists or di
 - **WHEN** no message ID can be determined from the hook's input
 - **THEN** the plugin does not record anything and does not throw
 
+#### Scenario: V2 prompt-submission event's prompt payload is never mutated at recording time
+
+- **WHEN** the V2 runtime delivers a prompt-submission event carrying both a message ID and a mutable prompt payload
+- **THEN** the plugin reads the message ID and records the send time
+- **AND** the event's prompt payload is left completely unmodified at this point
+
 ### Requirement: The recorded timestamp is injected into the model-facing copy of matching user messages
 
 Before each call to the model, the plugin SHALL prepend `[<timestamp>]` to the first text
 content item of every user message for which a timestamp was previously recorded, operating
 only on the ephemeral, per-call copy of the message list — never on the copy the host persists
-or displays.
+or displays. On a runtime whose message shape differs from `{role, content}` (e.g. a nested
+`{info:{id,role}, parts}` shape), the plugin SHALL apply this behavior identically regardless of
+the underlying field names.
 
 #### Scenario: Prepends timestamp to first text part of a recorded user message
 
@@ -70,6 +81,11 @@ or displays.
 
 - **WHEN** the model-facing list contains multiple qualifying user messages
 - **THEN** each one receives its own independently recorded timestamp
+
+#### Scenario: Skips a message whose identifier cannot be matched to a recorded timestamp
+
+- **WHEN** a message in the model-facing list carries no identifier, or an identifier that was never recorded
+- **THEN** the plugin leaves that message's content completely unmodified and does not throw
 
 ### Requirement: The system prompt explains the timestamp convention
 
