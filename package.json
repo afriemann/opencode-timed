@@ -31,7 +31,7 @@
     }
   },
   "devDependencies": {
-    "@opencode/plugin": "^2.0.24",
+    "@opencode/plugin": "^2.0.27",
     "jest": "^30.5.2"
   },
   "license": "MIT"
