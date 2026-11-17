@@ -1,33 +1,15 @@
-// src/core.js — opencode-timed plugin, runtime-agnostic core.
-//
-// Holds every behavior that does NOT depend on which opencode plugin API
-// (V1 or V2) is hosting this plugin: config loading, timestamp formatting,
-// the per-message timestamp store, the shape-agnostic content-array
-// injection routine, and the system-prompt text. Neither `@opencode-ai/plugin`
-// nor `@opencode/plugin` is ever imported here — every host-specific
-// behavior (message shape, event shape, logging sink) is supplied by the
-// calling adapter.
-//
-// See design.md for the full architecture and the D3 decision record (why
-// V2 records in the `prompt` hook without mutating its payload, and injects
-// only in the `context` hook's ephemeral `messages` array).
+// src/core.js — opencode-timed plugin logic that does not depend on the
+// host context: config loading, timestamp formatting, the persistent
+// per-message timestamp store, content-array injection, the system-prompt
+// text and the JSON-line logger. `@opencode/plugin` is never imported here.
 
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
-/**
- * The plugin's own name, used as the log-line prefix (`formatLogMessage`)
- * and as the V2 adapter's `id`. Single source of truth for both adapters —
- * previously declared separately in each (`SERVICE` here, `PLUGIN_NAME` in
- * plugin.v2.js, an inline literal in plugin.v1.js's log call).
- */
+/** The plugin's own name: the plugin `id` and the log `service`. */
 export const PLUGIN_NAME = 'opencode-timed'
 
-/**
- * Path to the plugin's user-level config file. Single source of truth for
- * both adapters — previously duplicated verbatim in plugin.v1.js and
- * plugin.v2.js.
- */
+/** Path to the plugin's user-level config file. */
 export const CONFIG_FILE = join(homedir(), '.config', 'opencode', 'opencode-timed.json')
 
 // ---------------------------------------------------------------------------
@@ -61,6 +43,9 @@ export async function loadConfig(readFileFn, configPath, optionsOverride, onErro
 // ---------------------------------------------------------------------------
 // Timestamp formatting
 // ---------------------------------------------------------------------------
+
+/** The supported timestamp formats; the first is the default. */
+export const FORMATS = ['iso', 'datetime', 'time']
 
 const pad = (n) => String(n).padStart(2, '0')
 
@@ -104,22 +89,99 @@ export const SYSTEM_PROMPT = [
 ].join('\n')
 
 // ---------------------------------------------------------------------------
-// Timestamp store
+// Logging
 // ---------------------------------------------------------------------------
 
 /**
- * A per-message timestamp store, keyed by messageID; lives for the lifetime
- * of the host process. Unbounded by design (design.md D7): an eviction
- * policy risks dropping a timestamp for a message still in context, a
- * correctness regression traded for no measurable gain at realistic scale.
+ * Describes an error by class and code only. The message and stack are
+ * omitted because host and storage errors can embed paths or other
+ * sensitive content.
  *
- * @returns {{record: (messageID: string|undefined, timestamp: string) => void, get: (messageID: string|undefined) => string|undefined}}
+ * @param {unknown} err
+ * @returns {{errorClass: string, errorCode?: string|number}}
  */
-export function createTimestampStore() {
+export function describeError(err) {
+  const code = err?.code
+  return {
+    errorClass: err?.constructor?.name ?? typeof err,
+    errorCode: typeof code === 'string' || typeof code === 'number' ? code : undefined,
+  }
+}
+
+/**
+ * Returns a logger that writes one JSON line per entry to stderr, the only
+ * channel a V2 plugin has. It never throws: a logging failure must not
+ * disturb the host.
+ *
+ * @returns {(level: 'debug'|'info'|'warn'|'error', message: string, extra?: Record<string, unknown>) => void}
+ */
+export function createLogger() {
+  return (level, message, extra = {}) => {
+    try {
+      process.stderr.write(JSON.stringify({ service: PLUGIN_NAME, level, message, ...extra }) + '\n')
+    } catch {
+      // Intentionally swallowed: there is no other channel to report a failed log write on.
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Timestamp store
+// ---------------------------------------------------------------------------
+
+const STORAGE_KEY_PREFIX = 'ts:'
+
+/**
+ * A per-message timestamp store keyed by messageID. Reads are served from
+ * memory; every record is also written to the plugin's host storage so
+ * timestamps survive a restart. Unbounded by design: an eviction policy
+ * risks dropping a timestamp for a message still in context (entries are
+ * therefore also never removed from host storage). Storage failures are
+ * logged and never thrown.
+ *
+ * @param {{get?: Function, set: (key: string, value: string) => Promise<void>, scan: (o: {prefix: string, after?: string}) => Promise<{entries: ReadonlyArray<{key: string, value: unknown}>, next?: string}>}} storage
+ * @param {ReturnType<typeof createLogger>} log
+ */
+export function createTimestampStore(storage, log) {
   const messageTimestamps = new Map()
   return {
+    /** Restores every persisted timestamp into memory. */
+    async load() {
+      try {
+        let after
+        do {
+          const page = await storage.scan({ prefix: STORAGE_KEY_PREFIX, after })
+          for (const { key, value } of page.entries) {
+            if (typeof value === 'string') messageTimestamps.set(key.slice(STORAGE_KEY_PREFIX.length), value)
+          }
+          after = page.next
+        } while (after !== undefined)
+      } catch (err) {
+        log('warn', 'timestamp restore failed', {
+          operation: 'storage.scan',
+          fallback: 'memory-only',
+          ...describeError(err),
+        })
+      }
+    },
+    /**
+     * Records the first timestamp seen for a message; later calls for the
+     * same ID are ignored, since the host may run the `prompt` hook more
+     * than once. Persistence is not awaited so host admission is never
+     * blocked on storage latency.
+     */
     record(messageID, timestamp) {
-      if (messageID) messageTimestamps.set(messageID, timestamp)
+      if (!messageID || messageTimestamps.has(messageID)) return
+      messageTimestamps.set(messageID, timestamp)
+      Promise.resolve()
+        .then(() => storage.set(STORAGE_KEY_PREFIX + messageID, timestamp))
+        .catch((err) =>
+          log('warn', 'timestamp persist failed', {
+            operation: 'storage.set',
+            fallback: 'memory-only',
+            ...describeError(err),
+          }),
+        )
     },
     get(messageID) {
       return messageTimestamps.get(messageID)
@@ -128,7 +190,7 @@ export function createTimestampStore() {
 }
 
 // ---------------------------------------------------------------------------
-// Content-array injection (shape-agnostic — design.md D2)
+// Content-array injection
 // ---------------------------------------------------------------------------
 
 /**
@@ -136,7 +198,7 @@ export function createTimestampStore() {
  * or unshifts a standalone text element containing only the timestamp when
  * no text element exists. Mutates the array in place — `parts` must be the
  * live, per-call array the host will actually send to the model, never a
- * copy the host also persists or displays (see design.md D3).
+ * copy the host also persists or displays.
  *
  * @param {Array<{type: string, text?: string}>} parts
  * @param {string} timestamp
@@ -151,48 +213,25 @@ export function injectTimestampIntoParts(parts, timestamp) {
 }
 
 /**
- * Walks `messages`, injecting a previously recorded timestamp into each
- * qualifying user message's content array. Shape-agnostic: the caller
- * supplies accessors for the host's own message shape (design.md D2) —
- * V1's `{info:{id,role}, parts}` or V2's `{id,role,content}`.
+ * Walks `messages` (`{id?, role, content}`), injecting a previously recorded
+ * timestamp into each qualifying user message. A message is skipped when it
+ * is not a user message, has no recorded timestamp (including no `id`), or
+ * has no content items.
  *
- * A message is skipped (left completely unmodified) when: it is not a user
- * message; no timestamp was recorded for its ID (including when the host
- * provides no ID at all — V2's `Message.id` is optional, design.md R2); or
- * its content array is missing/empty.
- *
- * @param {Array<unknown>} messages
+ * @param {Array<{id?: string, role?: string, content?: Array<{type:string,text?:string}>}>} messages
  * @param {{get: (messageID: string|undefined) => string|undefined}} store
- * @param {{getId: (msg: unknown) => string|undefined, getRole: (msg: unknown) => string|undefined, getParts: (msg: unknown) => Array<{type:string,text?:string}>|undefined}} accessors
+ * @returns {{count: number, size: number}} messages modified and characters of timestamp text added
  */
-export function injectTimestampsIntoMessages(messages, store, { getId, getRole, getParts }) {
-  if (!Array.isArray(messages)) return
+export function injectTimestampsIntoMessages(messages, store) {
+  const injected = { count: 0, size: 0 }
+  if (!Array.isArray(messages)) return injected
   for (const msg of messages) {
-    if (getRole(msg) !== 'user') continue
-    const ts = store.get(getId(msg))
-    if (!ts) continue
-    const parts = getParts(msg)
-    if (!Array.isArray(parts) || parts.length === 0) continue
-    injectTimestampIntoParts(parts, ts)
+    if (msg?.role !== 'user') continue
+    const ts = store.get(msg.id)
+    if (!ts || !Array.isArray(msg.content) || msg.content.length === 0) continue
+    injectTimestampIntoParts(msg.content, ts)
+    injected.count += 1
+    injected.size += ts.length + 3
   }
-}
-
-// ---------------------------------------------------------------------------
-// Logging
-// ---------------------------------------------------------------------------
-
-/**
- * Formats a log message consistently across both adapters. Each adapter
- * supplies its own sink (V1: `client.app.log`, falling back to stderr; V2:
- * stderr only, since `Context.app` has no `log` method — design.md D6).
- *
- * @param {string} message
- * @param {unknown} [err]
- * @returns {string}
- */
-export function formatLogMessage(message, err) {
-  const detail = err
-    ? `: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`
-    : ''
-  return `[${PLUGIN_NAME}] ${message}${detail}`
+  return injected
 }

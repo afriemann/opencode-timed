@@ -11,8 +11,8 @@ system prompt.
 ### Requirement: Each user message's send time is recorded without modifying the stored message
 
 The plugin SHALL record the wall-clock time at which each user message is submitted, keyed by
-the message's own identifier, without mutating any field the host persists or displays. On V2,
-this identifier SHALL be read directly from the runtime's own prompt-submission event and the
+the message's own identifier, without mutating any field the host persists or displays. The
+identifier SHALL be read directly from the runtime's own prompt-submission event and the
 event's prompt payload SHALL NOT be mutated at this point, since that payload may be the value
 the host persists as the stored message body.
 
@@ -24,8 +24,8 @@ the host persists as the stored message body.
 
 #### Scenario: Records by the host-assigned message ID when no ID is supplied up front
 
-- **WHEN** the host assigns a message ID only after the message is submitted
-- **THEN** the plugin uses that host-assigned ID as the recording key
+- **WHEN** the prompt-submission event carries the host-assigned message ID
+- **THEN** the plugin uses that ID as the recording key
 
 #### Scenario: Is a no-op when no message ID is available from any source
 
@@ -43,9 +43,7 @@ the host persists as the stored message body.
 Before each call to the model, the plugin SHALL prepend `[<timestamp>]` to the first text
 content item of every user message for which a timestamp was previously recorded, operating
 only on the ephemeral, per-call copy of the message list — never on the copy the host persists
-or displays. On a runtime whose message shape differs from `{role, content}` (e.g. a nested
-`{info:{id,role}, parts}` shape), the plugin SHALL apply this behavior identically regardless of
-the underlying field names.
+or displays.
 
 #### Scenario: Prepends timestamp to first text part of a recorded user message
 
@@ -127,3 +125,31 @@ SHALL fall back to `iso` for any unrecognised format value.
 
 - **WHEN** the configured format is not one of `iso`, `datetime`, or `time`
 - **THEN** the plugin behaves as if `iso` were configured
+
+### Requirement: Recorded timestamps survive a restart
+
+The plugin SHALL persist each recorded timestamp in the plugin's own host storage, and SHALL
+restore the persisted timestamps when it is loaded, so that messages sent before a restart or
+session resume keep their timestamp prefix.
+
+#### Scenario: Timestamps recorded before a restart are injected after it
+
+- **WHEN** a message's timestamp was recorded, the plugin is loaded again, and the next model call includes that message
+- **THEN** the plugin prepends the originally recorded timestamp to that message
+
+#### Scenario: Storage failure does not stop timestamping
+
+- **WHEN** persisting or restoring timestamps fails
+- **THEN** the failure is logged and no exception propagates
+- **AND** timestamps recorded in the current process are still injected
+
+### Requirement: A message's first recorded send time is kept
+
+The plugin SHALL keep the first send time recorded for a message ID and SHALL ignore later
+recordings for the same ID, because the host may run the prompt-submission hook more than once
+for one message.
+
+#### Scenario: A repeated prompt hook run keeps the first timestamp
+
+- **WHEN** the prompt-submission hook runs twice for the same message ID at different times
+- **THEN** the injected timestamp is the one from the first run
