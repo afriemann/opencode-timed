@@ -6,17 +6,35 @@ exactly when each message was sent, without cluttering the chat UI.
 
 ## How it works
 
-Two hooks work together on V1 (`@opencode-ai/plugin`), and an equivalent pair on V2
-(`@opencode/plugin`):
+Two session hooks on `@opencode/plugin` (V2):
 
-| V1 hook | V2 hook | Purpose |
-|---|---|---|
-| `chat.message` | `session.hook("prompt")` | Records the wall-clock time for each message by its internal ID, without touching the stored message (TUI stays clean) |
-| `experimental.chat.messages.transform` + `experimental.chat.system.transform` | `session.hook("context")` | Before every LLM call, prepends `[<timestamp>]` to the first text part of each matching user message and injects the system-prompt explanation. opencode loads message copies fresh per call, so these mutations never reach the DB or the TUI. |
+| Hook | Purpose |
+|---|---|
+| `session.hook("prompt")` | Records the wall-clock time of each user message by its message ID. The stored message is never modified, so the TUI stays clean. |
+| `session.hook("context")` | Before every model call, prepends `[<timestamp>]` to the first text part of each recorded user message in the per-call message list and appends a short system-prompt explanation of the convention. |
 
-V2 collapses the two `experimental.*` V1 hooks into one `context` hook, since V2 exposes both
-the system prompt and the message list on the same event. See `docs/v2-compat-audit.md` for the
-full hook-mapping rationale and live verification results.
+Recorded timestamps are persisted in the plugin's own opencode storage (one small `ts:<messageID>`
+entry per user message), so messages keep their `[<timestamp>]` prefix after a restart or session
+resume. Entries are never pruned, because removing one could drop the timestamp of a message still
+in context; they are loaded once at startup.
+
+## Hidden model-facing content
+
+The model receives two things the user does not see in the TUI, by design:
+
+- the `[<timestamp>]` prefix on user messages, and
+- a system-prompt section (`## Message timestamps (opencode-timed)`) explaining it (exact text:
+  `SYSTEM_PROMPT` in `src/core.js`).
+
+There is no option to show or disable them; uninstall the plugin to stop both. Each injection
+writes one `debug` log line (channel and size, never content); run opencode with debug logging
+to see them.
+
+## Logging
+
+Diagnostics are written to stderr as one JSON line per entry
+(`{"service":"opencode-timed","level":...,"message":...}`). Errors are logged as class and code
+only. `info` covers startup and the resolved config; `debug` covers hook decisions and injections.
 
 ## Installation
 
@@ -26,20 +44,15 @@ On a new machine it is picked up automatically by `make bootstrap`.
 To bump the pin to the latest commit on an existing machine, run `make bump`
 from the `ai-dotfiles` repo.
 
-### V1 (`@opencode-ai/plugin`)
+The package requires opencode V2 (`@opencode/plugin`, a peer dependency) and Node.js 22.12 or
+newer; V1 is not supported. Its entrypoint is `src/plugin.v2.js` (package root and `./v2`).
 
-Symlink `src/plugin.v1.js` from `~/.config/opencode/plugins/` (or point the ai-dotfiles vendor
-config at it — this is the package's default/root export, so existing installs resolving
-through npm's package exports (`.` / the package root) keep working unchanged. Any config that
-hardcodes the literal path `src/index.js` must be updated to `src/plugin.v1.js` — that file was
-renamed and no longer exists).
-
-### V2 (`@opencode/plugin`)
-
-V2 auto-discovers plugins from a project-local `.opencode/plugins/` directory. Copy (or
-symlink) `src/plugin.v2.js` there, and place `src/core.js` in a **sibling** `.opencode/lib/`
-directory — `.opencode/plugins/` scans and attempts to load *every* `.js` file placed directly
-inside it as an independent plugin candidate, so shared modules must live elsewhere.
+For manual installs, V2 auto-discovers plugins from a project-local `.opencode/plugins/`
+directory. Copy `src/plugin.v2.js` there and place `src/core.js` in a **sibling**
+`.opencode/lib/` directory, rewriting the import to `../lib/core.js`:
+`.opencode/plugins/` loads *every* `.js` file placed directly inside it as a plugin candidate.
+`plugin.v2.js` imports `@opencode/plugin` at runtime, so that package must be resolvable from the
+plugins directory.
 
 ## Configuration
 
