@@ -21,7 +21,7 @@
     "@opencode/plugin": ">=2.0.0"
   },
   "devDependencies": {
-    "@opencode/plugin": "^2.2.6",
+    "@opencode/plugin": "^2.3.0",
     "jest": "^30.5.2"
   },
   "license": "MIT"
